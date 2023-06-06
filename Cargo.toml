@@ -1,0 +1,11 @@
+[package]
+name = "card-storage"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+dotenvy = "0.15.0"
+diesel = { version = "2.0.3", features = ["sqlite"] }
+clap = "4.3.2"
