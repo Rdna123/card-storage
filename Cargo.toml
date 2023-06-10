@@ -9,3 +9,6 @@ edition = "2021"
 dotenvy = "0.15.0"
 clap = "4.3.2"
 rusqlite = "0.29.0"
+scryfall = "0.13.4"
+futures = "0.3.28"
+tokio = { version = "1.28.2", features = ["full"] }
