@@ -1,64 +1,121 @@
-use clap::{builder::Str, Arg, ArgAction, ArgMatches, Command, Subcommand};
-use futures::future::join;
-use rusqlite::{Connection, Result};
+use std::fs;
+
+use chrono::{NaiveDate};
+use clap::{Arg, ArgAction, Command};
+use futures::{future::join_all, stream::FuturesUnordered, join, TryStreamExt};
+// use rusqlite::{Connection, Result};
 use scryfall::card::Card;
-use tokio::runtime::Runtime;
+use sqlx::{SqliteConnection, Result, Connection, Executor};
+use tokio::task::JoinError;
 
 #[derive(Debug)]
-struct SCard {
+struct CardBase {
     name: String,
     set_code: String,
-    amount: i32,
     price: f32,
     formats: Vec<String>,
 }
 
-fn check_for_table(conn: &Connection) -> Result<()> {
-    let mut db_check =
-        conn.prepare("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='card'")?;
-    let mut check = db_check.query([])?;
+struct CardUser{
+    card: CardBase,
+    amount: i32,
+}
 
-    if let Some(row) = check.next()? {
-        let x: i32 = row.get(0)?;
-        if x == 0 {
-            conn.execute(
-                "CREATE TABLE card (
-            name TEXT NOT NULL PRIMARY KEY,
-            set_code NOT NULL,
-            amount INTEGAR NOT NULL,
-            prince FLOAT,
-            formats BLOB
-            )",
-                (),
-            )?;
+struct CardCol{
+    card: CardBase,
+    date: NaiveDate,
+}
+
+async fn check_for_table(conn: &mut SqliteConnection) -> Result<()> {
+    
+    
+            conn.fetch(sqlx::query(
+                    "CREATE TABLE cardbase IF NOT EXISTS(
+                name TEXT NOT NULL PRIMARY KEY,
+                set_code NOT NULL,
+                price FLOAT,
+                formats BLOB
+                )"));
+
+            
+
+            conn.fetch(sqlx::query("CREATE TABLE cardcol IF NOT EXISTS (
+                FOREIGN KEY (card) REFERENCES cardbase,
+                date GLOB
+            )"));
+
+            conn.fetch(sqlx::query("CREATE TABLE carduser IF NOT EXISTS(
+                FOREIGN KEY (card) REFERENCES cardbase,
+                amount NOT NULL INT
+            )"));
             //println!("created table");
-        }
-    }
+        
+    
     Ok(())
 }
 
-fn look_up_card(runtime: &Runtime, card_name: &str, amount: i32) -> scryfall::Card{
+async fn look_up_card(card_name: String, amount: i32) -> scryfall::Card {
+
+    //TODO: Add fuzz search of cardcol
     println!("{:?} {:?}", card_name, &amount);
     let card: Card;
-    let result = runtime.block_on(Card::named_fuzzy(card_name));
+    let result = Card::named_fuzzy(&card_name).await;
     match result {
         Ok(c) => card = c,
-        Err(e) => panic!("{}", format!("{:?}", e)),
+        Err(_) => panic!("network error"),
     }
+    eprintln!("done");
     card
 }
 
-fn main() -> Result<()> {
-    let conn = Connection::open("./card_database")?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+//TODO: Add detailed search for cards in multiple sets
 
-    check_for_table(&conn)?;
+struct Batch {
+    cards: Vec<std::result::Result<Card, JoinError>>,
+    amounts: Vec<i32>,
+}
+
+async fn batch_lookup(file: String) -> Batch {
+    let card_list = fs::read_to_string(file).unwrap();
+    let cards_list_split = card_list.split("\n");
+    println!("{:#?}", cards_list_split);
+    // let mut set = JoinSet::new();
+    let futs: FuturesUnordered<_> = FuturesUnordered::new();
+    let mut amounts: Vec<i32> = vec![];
+    for card in cards_list_split {
+        let index = shlex::split(card).unwrap();
+        let mut iter_index = index.iter();
+        let name = iter_index.next().unwrap().to_owned();
+        let amount = match iter_index.next() {
+            Some(a) => a.parse().unwrap(),
+            None => {
+                println!("No amount of {name} was give assigning amount to 1");
+                1
+            }
+        };
+        amounts.push(amount);
+        println!("card");
+        let h = tokio::spawn(async move { look_up_card(name.clone(), amount).await });
+        futs.push(h);
+    }
+    let cards = join_all(futs).await;
+    amounts.reverse();
+    return Batch { cards, amounts };
+}
+
+#[tokio::main]
+async fn main() -> Result<()> { 
+    // Known card database
+    let mut card_conn = SqliteConnection::connect("./card_database").await?;
+    // User's cards
+
+   
+    check_for_table(&mut card_conn).await?;
+    
+
 
     let prog = Command::new("card-storage")
-        // TODO: Add flag file to to batch work
+        // TODO: Turn sub commands into flags
         .arg(
             Arg::new("file")
                 .short('f')
@@ -67,7 +124,7 @@ fn main() -> Result<()> {
         )
         .subcommand(
             Command::new("add").args([
-                Arg::new("card").help("card name"),
+                Arg::new("card").help("card name or file if file flag"),
                 Arg::new("amount")
                     .default_value("1")
                     .help("number of cards default is 1"),
@@ -75,7 +132,7 @@ fn main() -> Result<()> {
         )
         .subcommand(
             Command::new("remove").args([
-                Arg::new("card").help("card namem"),
+                Arg::new("card").help("card name or file if file flag"),
                 Arg::new("amount")
                     .default_value("0")
                     .help("amount of cards to remove"),
@@ -87,10 +144,29 @@ fn main() -> Result<()> {
         Some(("add", args)) => {
             if !args.get_flag("file") {
                 let card_name = args.get_one::<String>("card").unwrap();
-                let amount = args.get_one::<String>("amount").unwrap().parse::<i32>().unwrap();
-                let card = look_up_card(&runtime, card_name, amount);
+                let amount = args
+                    .get_one::<String>("amount")
+                    .unwrap()
+                    .parse::<i32>()
+                    .unwrap();
+                let card = look_up_card(card_name.to_string(), amount).await;
                 println!("{}", card.prices.usd.unwrap());
+            } else {
+                let file = args.get_one::<String>("card").unwrap().to_owned();
+                let batch = batch_lookup(file).await;
+                let mut amounts_iter = batch.amounts.iter();
+                for card_result in batch.cards {
+                    let card = card_result.unwrap();
+                    println!(
+                        "{} - {} - {} - {}",
+                        card.name,
+                        card.set_name,
+                        card.prices.usd.unwrap(),
+                        amounts_iter.next().unwrap()
+                    );
+                }
             }
+            // TODO: Database lookup and entry
         }
         Some(("remove", args)) => {
             println!(

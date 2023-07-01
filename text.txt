@@ -1,0 +1,7 @@
+"fleshpulper" 1
+"Lightning Axe" 2
+"Thallid Omnivore" 3
+"Villainous Wealth" 4
+"Pewter Golem" 5
+"Battle Rampart" 6
+"Birthday Escape" 
