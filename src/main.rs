@@ -1,12 +1,13 @@
-use std::fs;
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+};
 
-use chrono::{NaiveDate};
+use chrono::NaiveDate;
 use clap::{Arg, ArgAction, Command};
-use futures::{future::join_all, stream::FuturesUnordered, join, TryStreamExt};
 // use rusqlite::{Connection, Result};
 use scryfall::card::Card;
-use sqlx::{SqliteConnection, Result, Connection, Executor};
-use tokio::task::JoinError;
+use sqlx::{types, Connection, Executor, Result, SqliteConnection, SqlitePool};
 
 #[derive(Debug)]
 struct CardBase {
@@ -16,46 +17,58 @@ struct CardBase {
     formats: Vec<String>,
 }
 
-struct CardUser{
+struct CardUser {
     card: CardBase,
     amount: i32,
 }
 
-struct CardCol{
+struct CardCol {
     card: CardBase,
     date: NaiveDate,
 }
 
-async fn check_for_table(conn: &mut SqliteConnection) -> Result<()> {
-    
-    
-            conn.fetch(sqlx::query(
-                    "CREATE TABLE cardbase IF NOT EXISTS(
+struct KnownCards {
+    cards: HashSet<String>,
+}
+
+impl KnownCards {
+    fn get(path: &str) -> Self {
+        let file = std::fs::File::open(path);
+        return Self {
+            cards: HashSet::new(),
+        };
+    }
+}
+
+async fn check_for_table(conn: &SqlitePool) -> Result<()> {
+    conn.fetch(sqlx::query(
+        "CREATE TABLE cardbase IF NOT EXISTS(
                 name TEXT NOT NULL PRIMARY KEY,
                 set_code NOT NULL,
-                price FLOAT,
+                price TEXT,
                 formats BLOB
-                )"));
+                )",
+    ));
 
-            
-
-            conn.fetch(sqlx::query("CREATE TABLE cardcol IF NOT EXISTS (
+    conn.fetch(sqlx::query(
+        "CREATE TABLE cardcol IF NOT EXISTS (
                 FOREIGN KEY (card) REFERENCES cardbase,
-                date GLOB
-            )"));
+                date BLOB
+            )",
+    ));
 
-            conn.fetch(sqlx::query("CREATE TABLE carduser IF NOT EXISTS(
+    conn.fetch(sqlx::query(
+        "CREATE TABLE carduser IF NOT EXISTS(
                 FOREIGN KEY (card) REFERENCES cardbase,
                 amount NOT NULL INT
-            )"));
-            //println!("created table");
-        
-    
+            )",
+    ));
+    //println!("created table");
+
     Ok(())
 }
 
-async fn look_up_card(card_name: String, amount: i32) -> scryfall::Card {
-
+async fn look_up_card(card_name: String, amount: i32, conn: &SqlitePool) -> scryfall::Card {
     //TODO: Add fuzz search of cardcol
     println!("{:?} {:?}", card_name, &amount);
     let card: Card;
@@ -64,6 +77,13 @@ async fn look_up_card(card_name: String, amount: i32) -> scryfall::Card {
         Ok(c) => card = c,
         Err(_) => panic!("network error"),
     }
+    conn.fetch(
+        sqlx::query("INSERT INTO cardbase (name, set_code, price, formats) VALUES ($1,$2,$3,$4)")
+            .bind(&card.name.clone())
+            .bind(&card.set.to_string().clone())
+            .bind(&card.prices.usd.clone())
+            .bind("formats"),
+    );
     eprintln!("done");
     card
 }
@@ -71,17 +91,17 @@ async fn look_up_card(card_name: String, amount: i32) -> scryfall::Card {
 //TODO: Add detailed search for cards in multiple sets
 
 struct Batch {
-    cards: Vec<std::result::Result<Card, JoinError>>,
+    cards: Vec<Card>,
     amounts: Vec<i32>,
 }
 
-async fn batch_lookup(file: String) -> Batch {
+async fn batch_lookup(file: String, conn: &SqlitePool) -> Batch {
     let card_list = fs::read_to_string(file).unwrap();
     let cards_list_split = card_list.split("\n");
     println!("{:#?}", cards_list_split);
     // let mut set = JoinSet::new();
-    let futs: FuturesUnordered<_> = FuturesUnordered::new();
     let mut amounts: Vec<i32> = vec![];
+    let mut cards = vec![];
     for card in cards_list_split {
         let index = shlex::split(card).unwrap();
         let mut iter_index = index.iter();
@@ -95,24 +115,20 @@ async fn batch_lookup(file: String) -> Batch {
         };
         amounts.push(amount);
         println!("card");
-        let h = tokio::spawn(async move { look_up_card(name.clone(), amount).await });
-        futs.push(h);
+        let c = look_up_card(name.clone(), amount, conn).await;
+        cards.push(c);
     }
-    let cards = join_all(futs).await;
     amounts.reverse();
     return Batch { cards, amounts };
 }
 
 #[tokio::main]
-async fn main() -> Result<()> { 
+async fn main() -> Result<()> {
     // Known card database
-    let mut card_conn = SqliteConnection::connect("./card_database").await?;
+    let mut card_conn = SqlitePool::connect("./card_database").await?;
     // User's cards
 
-   
-    check_for_table(&mut card_conn).await?;
-    
-
+    check_for_table(&card_conn).await?;
 
     let prog = Command::new("card-storage")
         // TODO: Turn sub commands into flags
@@ -149,14 +165,14 @@ async fn main() -> Result<()> {
                     .unwrap()
                     .parse::<i32>()
                     .unwrap();
-                let card = look_up_card(card_name.to_string(), amount).await;
+                let card = look_up_card(card_name.to_string(), amount, &mut card_conn).await;
                 println!("{}", card.prices.usd.unwrap());
             } else {
                 let file = args.get_one::<String>("card").unwrap().to_owned();
-                let batch = batch_lookup(file).await;
+                let batch = batch_lookup(file, &mut card_conn).await;
                 let mut amounts_iter = batch.amounts.iter();
                 for card_result in batch.cards {
-                    let card = card_result.unwrap();
+                    let card = card_result;
                     println!(
                         "{} - {} - {} - {}",
                         card.name,
