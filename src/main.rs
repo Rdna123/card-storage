@@ -1,11 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    io::{Read, Write},
 };
 
 use chrono::NaiveDate;
 use clap::{Arg, ArgAction, Command};
 // use rusqlite::{Connection, Result};
+use bytevec::{ByteDecodable, ByteEncodable};
 use scryfall::card::Card;
 use sqlx::{types, Connection, Executor, Result, SqliteConnection, SqlitePool};
 
@@ -33,10 +35,23 @@ struct KnownCards {
 
 impl KnownCards {
     fn get(path: &str) -> Self {
-        let file = std::fs::File::open(path);
-        return Self {
-            cards: HashSet::new(),
+        let handle = std::fs::File::open(path);
+        let mut file = match handle {
+            Ok(f) => f,
+            Err(_) => {
+                println!("No file found");
+                std::fs::File::create(path).unwrap()
+            }
         };
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer).unwrap();
+        let cards = <HashSet<String>>::decode::<u32>(&buffer).unwrap();
+        return Self { cards };
+    }
+    fn save(self, path: &str) {
+        let mut file = std::fs::File::create(path).unwrap();
+        let bytes = self.cards.encode::<u32>().unwrap();
+        file.write_all(bytes.as_slice()).unwrap();
     }
 }
 
