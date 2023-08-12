@@ -1,2 +1,3 @@
 /target
-./card_database
+./card_database.db
+/.env

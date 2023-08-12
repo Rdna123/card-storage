@@ -15,8 +15,14 @@ use sqlx::{types, Connection, Executor, Result, SqliteConnection, SqlitePool};
 struct CardBase {
     name: String,
     set_code: String,
-    price: f32,
-    formats: Vec<String>,
+    price: String,
+
+}
+
+impl From<Card> for CardBase{
+    fn from(value: Card) -> Self {
+        Self { name: value.name, set_code: value.set_name, price: value.prices.usd.unwrap_or_else(|| "0".to_owned()) }
+    }
 }
 
 struct CardUser {
@@ -24,10 +30,6 @@ struct CardUser {
     amount: i32,
 }
 
-struct CardCol {
-    card: CardBase,
-    date: NaiveDate,
-}
 
 struct KnownCards {
     cards: HashSet<String>,
@@ -55,33 +57,33 @@ impl KnownCards {
     }
 }
 
-async fn check_for_table(conn: &SqlitePool) -> Result<()> {
-    conn.fetch(sqlx::query(
-        "CREATE TABLE cardbase IF NOT EXISTS(
-                name TEXT NOT NULL PRIMARY KEY,
-                set_code NOT NULL,
-                price TEXT,
-                formats BLOB
-                )",
-    ));
+// async fn check_for_table(conn: &SqlitePool) -> Result<()> {
+//     conn.fetch(sqlx::query(
+//         "CREATE TABLE cardbase IF NOT EXISTS(
+//                 name TEXT NOT NULL PRIMARY KEY,
+//                 set_code NOT NULL,
+//                 price TEXT,
+//                 formats BLOB
+//                 )",
+//     ));
 
-    conn.fetch(sqlx::query(
-        "CREATE TABLE cardcol IF NOT EXISTS (
-                FOREIGN KEY (card) REFERENCES cardbase,
-                date BLOB
-            )",
-    ));
+//     conn.fetch(sqlx::query(
+//         "CREATE TABLE cardcol IF NOT EXISTS (
+//                 FOREIGN KEY (card) REFERENCES cardbase,
+//                 date BLOB
+//             )",
+//     ));
 
-    conn.fetch(sqlx::query(
-        "CREATE TABLE carduser IF NOT EXISTS(
-                FOREIGN KEY (card) REFERENCES cardbase,
-                amount NOT NULL INT
-            )",
-    ));
-    //println!("created table");
+//     conn.fetch(sqlx::query(
+//         "CREATE TABLE carduser IF NOT EXISTS(
+//                 FOREIGN KEY (card) REFERENCES cardbase,
+//                 amount NOT NULL INT
+//             )",
+//     ));
+//     //println!("created table");
 
-    Ok(())
-}
+//     Ok(())
+// }
 
 async fn look_up_card(card_name: String, amount: i32, conn: &SqlitePool) -> scryfall::Card {
     //TODO: Add fuzz search of cardcol
@@ -140,10 +142,19 @@ async fn batch_lookup(file: String, conn: &SqlitePool) -> Batch {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Known card database
-    let mut card_conn = SqlitePool::connect("./card_database").await?;
+    let conn = SqlitePool::connect("sqlite:card_database.db").await;
+    let mut card_conn = match conn {
+        Ok(p) => p,
+        Err(_) => {
+            println!("Database not found, creating it");
+            std::fs::File::create("card_database.db")?;
+            SqlitePool::connect("sqlite:card_database.db").await?
+        },  
+    };
     // User's cards
+    // check_for_table(&card_conn).await?;
 
-    check_for_table(&card_conn).await?;
+    sqlx::migrate!().run(&card_conn).await?;
 
     let prog = Command::new("card-storage")
         // TODO: Turn sub commands into flags
@@ -181,7 +192,9 @@ async fn main() -> Result<()> {
                     .parse::<i32>()
                     .unwrap();
                 let card = look_up_card(card_name.to_string(), amount, &mut card_conn).await;
-                println!("{}", card.prices.usd.unwrap());
+                let card = CardBase::from(card);
+                println!("{}", card.price);
+                sqlx::query_as!(CardUser, r#"INSERT INTO carduser VALUES (?1, ?2, ?3, ?4)"#, card.name, card.set_code, card.price, 1).execute(&card_conn).await?;
             } else {
                 let file = args.get_one::<String>("card").unwrap().to_owned();
                 let batch = batch_lookup(file, &mut card_conn).await;
@@ -208,6 +221,8 @@ async fn main() -> Result<()> {
         }
         _ => println!("No command inputed"),
     }
+
+    
 
     // conn.execute(
     //     "CREATE TABLE person (
