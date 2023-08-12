@@ -1,3 +1,5 @@
 /target
-./card_database.db
-/.env
+card_database.db
+card_database.db-shm
+card_database.db-wal
+.env
