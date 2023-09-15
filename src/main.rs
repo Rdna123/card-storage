@@ -16,12 +16,15 @@ struct CardBase {
     name: String,
     set_code: String,
     price: String,
-
 }
 
-impl From<Card> for CardBase{
+impl From<Card> for CardBase {
     fn from(value: Card) -> Self {
-        Self { name: value.name, set_code: value.set_name, price: value.prices.usd.unwrap_or_else(|| "0".to_owned()) }
+        Self {
+            name: value.name,
+            set_code: value.set_name,
+            price: value.prices.usd.unwrap_or_else(|| "0".to_owned()),
+        }
     }
 }
 
@@ -30,7 +33,7 @@ struct CardUser {
     amount: i32,
 }
 
-
+#[derive(Debug)]
 struct KnownCards {
     cards: HashSet<String>,
 }
@@ -47,7 +50,7 @@ impl KnownCards {
         };
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer).unwrap();
-        let cards = <HashSet<String>>::decode::<u32>(&buffer).unwrap();
+        let cards = <HashSet<String>>::decode::<u32>(&buffer).unwrap_or_default();
         return Self { cards };
     }
     fn save(self, path: &str) {
@@ -55,6 +58,7 @@ impl KnownCards {
         let bytes = self.cards.encode::<u32>().unwrap();
         file.write_all(bytes.as_slice()).unwrap();
     }
+    fn search(self, card: &str) -> bool {}
 }
 
 // async fn check_for_table(conn: &SqlitePool) -> Result<()> {
@@ -143,13 +147,15 @@ async fn batch_lookup(file: String, conn: &SqlitePool) -> Batch {
 async fn main() -> Result<()> {
     // Known card database
     let conn = SqlitePool::connect("sqlite:card_database.db").await;
+    let mut known_cards = KnownCards::get("known_cards");
+    println!("{:?}", known_cards);
     let mut card_conn = match conn {
         Ok(p) => p,
         Err(_) => {
             println!("Database not found, creating it");
             std::fs::File::create("card_database.db")?;
             SqlitePool::connect("sqlite:card_database.db").await?
-        },  
+        }
     };
     // User's cards
     // check_for_table(&card_conn).await?;
@@ -194,7 +200,16 @@ async fn main() -> Result<()> {
                 let card = look_up_card(card_name.to_string(), amount, &mut card_conn).await;
                 let card = CardBase::from(card);
                 println!("{}", card.price);
-                sqlx::query_as!(CardUser, r#"INSERT INTO carduser VALUES (?1, ?2, ?3, ?4)"#, card.name, card.set_code, card.price, 1).execute(&card_conn).await?;
+                sqlx::query_as!(
+                    CardUser,
+                    r#"INSERT INTO carduser VALUES (?1, ?2, ?3, ?4)"#,
+                    card.name,
+                    card.set_code,
+                    card.price,
+                    1
+                )
+                .execute(&card_conn)
+                .await?;
             } else {
                 let file = args.get_one::<String>("card").unwrap().to_owned();
                 let batch = batch_lookup(file, &mut card_conn).await;
@@ -221,9 +236,7 @@ async fn main() -> Result<()> {
         }
         _ => println!("No command inputed"),
     }
-
-    
-
+    known_cards.save("known_cards");
     // conn.execute(
     //     "CREATE TABLE person (
     //         id   INTEGER PRIMARY KEY,
